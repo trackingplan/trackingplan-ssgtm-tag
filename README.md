@@ -67,14 +67,14 @@ const sendHttpGet = function(url, options) {
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `TP_ID` | Your Trackingplan ID (required) | None |
-| `MAX_BATCH_SIZE` | Maximum number of events in a batch | 20 |
-| `MAX_BATCH_AGE_SECONDS` | Maximum time to wait before sending a batch | 5 |
-| `SAMPLING_RATE` | Event sampling rate (1 = all events, 10 = 10% of events) | 1 |
-| `ENVIRONMENT` | Environment identifier ("PRODUCTION" or "TESTING") | "PRODUCTION" |
-| `ENDPOINT` | Trackingplan API endpoint | "https://tracks.trackingplan.com/v1/" |
-| `TAGS` | Custom key-value pairs to send with all events | {} |
-| `EXTRA_LOG` | Enable detailed logging for debugging | false |
+| `tpId` | Your Trackingplan ID (required) | None |
+| `maxBatchSize` | Maximum number of events in a batch | 1 |
+| `maxBatchAgeSeconds` | Maximum time to wait before sending a batch | 5 |
+| `samplingRate` | Event sampling rate (1 = all events, 10 = 10% of events) | 1 |
+| `environment` | Environment identifier ("PRODUCTION" or "TESTING") | "PRODUCTION" |
+| `endpoint` | Trackingplan API endpoint | "https://tracks.trackingplan.com/v1/" |
+| `tags` | Custom key-value pairs to send with all events | {} |
+| `extraLog` | Enable detailed logging for debugging | false |
 
 ## Debugging
 
