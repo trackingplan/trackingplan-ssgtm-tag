@@ -88,7 +88,7 @@ Logs can be viewed in the Server-Side GTM container's preview mode under the "Lo
 
 ## License
 
-This template is provided under the [MIT License](LICENSE).
+This template is provided under the [Apache 2.0 License](LICENSE).
 
 ## Support
 
