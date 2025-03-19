@@ -15,5 +15,5 @@
 homepage: "https://trackingplan.com"
 documentation: "https://docs.trackingplan.com"
 versions:
-  - sha: 0f68c3bfc632879ee84bb70aabc0100434935582
+  - sha: e564f675825c207c435780066161b45d52a6d809
     changeNotes: Initial Version
