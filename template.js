@@ -14,17 +14,18 @@
  * 3. Applies sampling based on configuration (if enabled)
  * 4. Batches events for efficient transmission
  * 5. Sends batches to Trackingplan's API when size threshold or time threshold is reached
+ * 6. Detects duplicates in GTM events and skips them
  *
  * Configuration Options:
  * ---------------------
- * - TP_ID: Your Trackingplan ID (required)
- * - MAX_BATCH_SIZE: Maximum number of events to include in a single batch (default: 20)
- * - MAX_BATCH_AGE_SECONDS: Maximum time to wait before sending a batch (default: 5 seconds)
- * - SAMPLING_RATE: Event sampling rate (1 = all events, 10 = 10% of events, etc.)
- * - ENVIRONMENT: Environment identifier (default: "PRODUCTION").
- * - ENDPOINT: Trackingplan API endpoint (default: https://tracks.trackingplan.com/v1/)
- * - TAGS: Custom key-value pairs to send with all events
- * - EXTRA_LOG: Enable detailed logging for debugging
+ * - tpId: Your Trackingplan ID (required)
+ * - maxBatchSize: Maximum number of events to include in a single batch (default: 20)
+ * - maxBatchAgeSeconds: Maximum time to wait before sending a batch (default: 5 seconds)
+ * - samplingRate: Event sampling rate (1 = all events, 10 = 10% of events, etc.)
+ * - environment: Environment identifier (default: "PRODUCTION").
+ * - endpoint: Trackingplan API endpoint (default: https://tracks.trackingplan.com/v1/)
+ * - tags: Custom key-value pairs to send with all events
+ * - extraLog: Enable detailed logging for debugging
  *
  * @version 1
  * @see https://docs.trackingplan.com/
@@ -46,6 +47,7 @@ const getTimestampMillis = require('getTimestampMillis');
 const generateRandom = require('generateRandom');
 const makeInteger = require('makeInteger');
 const getContainerVersion = require('getContainerVersion');
+const Math = require('Math');
 
 /**
  * Parses, validates, and returns all options from the data object.
@@ -61,7 +63,12 @@ const getOptions = () => {
         ENDPOINT: data.endpoint || 'https://tracks.trackingplan.com/v1/',
         CUSTOM_TAGS: {},
         EXTRA_LOG: !!data.extraLog,
-        VERSION: VERSION
+        VERSION: VERSION,
+        // Track duplication settings
+        // Max number of track hashes to keep in storage to prevent duplicates
+        MAX_HASH_COUNT: 1000,
+        // Time in milliseconds after which to clear track hashes (default: 1 hour)
+        HASH_TTL_MS: 60 * 60 * 1000
     };
 
     // Process custom tags from data.TAGS
@@ -121,7 +128,53 @@ const log = function (alwaysLog, label, arg1, arg2, arg3) {
 log(false, "TRACKINGPLAN OPTIONS", OPTIONS);
 
 // Detailed logging only when EXTRA_LOG is enabled
-log(false, "FULL CONFIG DATA", data);
+log(false, "CONFIG DATA", data);
+
+/**
+ * Constants for hash tracking
+ */
+const HASH_STORAGE_KEY = 'seenHashes';
+const MAX_HASH_SIZE = 100;
+
+/**
+ * Check if a hash has been seen and add it to the set
+ * Returns true if the hash was already seen
+ * 
+ * @param {string} hash The hash to check and add
+ * @return {boolean} True if the hash already existed
+ */
+const checkAndAddHash = (hash) => {
+    if (!hash) return false;
+    
+    // Get the current set of seen hashes
+    let seenHashes = templateDataStorage.getItemCopy(HASH_STORAGE_KEY) || [];
+    
+    // Check if the hash exists in the set using indexOf for simplicity
+    const exists = seenHashes.indexOf(hash) !== -1;
+
+    // If it doesn't exist, add it and maintain the set size
+    if (!exists) {
+        // Add the new hash
+        seenHashes.push(hash);
+        
+        // Trim the array if it's too large (keep only the most recent MAX_HASH_SIZE hashes)
+        if (seenHashes.length > MAX_HASH_SIZE) {
+            // Remove oldest hashes (those at the beginning of the array)
+            const toRemove = Math.max(seenHashes.length - MAX_HASH_SIZE, -1 * Math.floor(MAX_HASH_SIZE/2));
+            seenHashes = seenHashes.slice(toRemove);
+            
+            log(false, "HASH CLEANUP - Removed oldest hashes to maintain size limit", {
+                removed: toRemove,
+                new_size: seenHashes.length
+            });
+        }
+        
+        // Save the updated set
+        templateDataStorage.setItemCopy(HASH_STORAGE_KEY, seenHashes);
+    }
+    
+    return exists;
+};
 
 /**
  * Creates a raw track object from an intercepted request or original request.
@@ -176,6 +229,22 @@ const processGTMEvent = () => {
     // Use ssgtm_event as the provider for GTM events
     const provider = "ssgtm_event";
 
+    // Get event data for duplicate detection
+    const eventData = getAllEventData();
+    
+    // Check for request_start_time_ms to detect duplicates
+    if (eventData && eventData['x-sst-system_properties'] && eventData['x-sst-system_properties'].request_start_time_ms) {
+        const trackHash = eventData['x-sst-system_properties'].request_start_time_ms.toString();
+        
+        // Check if this is a duplicate event
+        if (checkAndAddHash(trackHash)) {
+            log(false, "DUPLICATE GTM EVENT - Skipped processing", {
+                request_start_time_ms: trackHash
+            });
+            return;
+        }
+    }
+
     // Capture the original request
     const originalRequest = {
         url: fullRequestUrl,
@@ -185,14 +254,14 @@ const processGTMEvent = () => {
 
     // Construct the post_payload with event_data and original_request
     const postPayload = {
-        event_data: getAllEventData(),
+        event_data: eventData,
         original_request: originalRequest
     };
 
     // Create raw track with the new post_payload
     const raw_track = createRawTrack(provider, {
         url: fullRequestUrl,
-        body: postPayload,
+        body: JSON.stringify(postPayload),
         method: getRequestHeader('method') || "GET"
     });
 
@@ -250,7 +319,6 @@ const setupMessageListener = () => {
  * @param {Object} rawTrack The raw track to add to the queue
  */
 const addToQueue = (rawTrack) => {
-
     // Apply sampling - randomly select 1/SAMPLING_RATE of events
     if (OPTIONS.SAMPLING_RATE > 1) {
         const randomValue = generateRandom(1, OPTIONS.SAMPLING_RATE);
@@ -260,8 +328,10 @@ const addToQueue = (rawTrack) => {
             return;
         }
     }
+    
+    // Note: Duplicate detection for GTM events is now handled in processGTMEvent
 
-    // Always get the latest queue before any modifications
+    // Always get the latest queue before any modifications to ensure we have the most up-to-date state
     let queue = templateDataStorage.getItemCopy('rawTrackQueue') || [];
     let queueStartTime = templateDataStorage.getItemCopy('queueStartTime') || 0;
 
@@ -282,15 +352,16 @@ const addToQueue = (rawTrack) => {
     // Add the raw track to the queue
     queue.push(rawTrack);
 
-    // Store the updated queue immediately
+    // Store the updated queue immediately to ensure it's saved
     templateDataStorage.setItemCopy('rawTrackQueue', queue);
 
-    log(false, "QUEUE DEBUG - Added track for provider:", rawTrack);
+    log(false, "QUEUE DEBUG - Added track for provider:", rawTrack.provider);
     log(false, "QUEUE DEBUG - Queue size now:", queue.length);
 
     // Check if we should send the batch
     const currentTime = getTimestampMillis();
     const timeElapsed = currentTime - queueStartTime;
+    
     log(false, "QUEUE DEBUG - Time elapsed", {
         elapsed: timeElapsed,
         max: OPTIONS.MAX_BATCH_AGE_MS
@@ -301,12 +372,24 @@ const addToQueue = (rawTrack) => {
 
     log(false, "QUEUE DEBUG - Send status", {
         sendDueToSize: sendDueToSize,
-        sendDueToTime: sendDueToTime
+        sendDueToTime: sendDueToTime,
+        queue_size: queue.length,
+        max_batch_size: OPTIONS.MAX_BATCH_SIZE
     });
 
-    if (sendDueToSize || sendDueToTime) {
-        // Send the current queue snapshot
-        sendBatch(queue);
+    // Only send if we have something to send and we meet the criteria
+    if ((sendDueToSize || sendDueToTime) && queue.length > 0) {
+        // Make a copy of the current queue to send
+        // This ensures we're only sending what we intend to send
+        const queueToSend = queue.slice(0);
+        
+        log(false, "QUEUE DEBUG - Sending batch due to " + 
+            (sendDueToSize ? "size threshold" : "time threshold"), {
+            queue_size: queueToSend.length
+        });
+        
+        // Send a copy of the current queue
+        sendBatch(queueToSend);
     } else {
         log(false, "QUEUE DEBUG - Batch not sent yet. Waiting for more tracks or timeout.");
     }
@@ -329,6 +412,14 @@ const sendBatch = (queueToSend) => {
         log(false, "QUEUE DEBUG - Empty queue, nothing to send");
         return;
     }
+
+    // Store the length of the queue we're sending
+    const sentQueueLength = queue.length;
+    
+    // Log what we're about to send
+    log(false, "QUEUE DEBUG - Sending batch", {
+        batch_size: sentQueueLength
+    });
 
     // Get container info to include as tags
     const containerInfo = getContainerVersion();
@@ -370,46 +461,49 @@ const sendBatch = (queueToSend) => {
 
     log(false, "BATCH PAYLOAD TO SEND", batchPayload);
 
-    // Send the batch to the webhook
+    // Clear the queue immediately after preparing the payload
+    // Get the current queue state
+    let currentQueue = templateDataStorage.getItemCopy('rawTrackQueue') || [];
+    
+    // If the current queue is longer than what we sent, it means new items were added
+    // We only remove the items we sent, keeping the new ones
+    if (currentQueue.length > sentQueueLength) {
+        // Only remove the number of items we processed
+        // This assumes FIFO queue behavior where older items are at the beginning
+        let updatedQueue = currentQueue.slice(sentQueueLength);
+        templateDataStorage.setItemCopy('rawTrackQueue', updatedQueue);
+        
+        log(false, "QUEUE DEBUG - Queue partially cleared", {
+            processed_items: sentQueueLength,
+            remaining_items: updatedQueue.length
+        });
+    } else {
+        // If current queue size <= sent queue size, clear everything
+        templateDataStorage.setItemCopy('rawTrackQueue', []);
+        // Reset queue start time
+        templateDataStorage.setItemCopy('queueStartTime', 0);
+        
+        log(false, "QUEUE DEBUG - Queue fully cleared", {
+            cleared_items: currentQueue.length
+        });
+    }
+
+    // Send the batch to the webhook (fire and forget)
     sendHttpRequest(OPTIONS.WEBHOOK_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
     }, JSON.stringify(batchPayload))
         .then((response) => {
-            // Combined log with both batch info and response
+            // Just log the response
             log(true, "BATCH SENT", {
                 endpoint: OPTIONS.WEBHOOK_URL,
-                payload_size: queue.length,
+                payload_size: sentQueueLength,
                 response: response.statusCode
             });
-
-            // Safe queue clearing - only remove the items we sent
-            let currentQueue = templateDataStorage.getItemCopy('rawTrackQueue') || [];
-
-            // If the current queue is longer than what we sent, it means new items were added
-            // We only remove the items we sent, keeping the new ones
-            if (currentQueue.length > queue.length) {
-                // Only remove the number of items we processed
-                // This assumes FIFO queue behavior where older items are at the beginning
-                let updatedQueue = currentQueue.slice(queue.length);
-                templateDataStorage.setItemCopy('rawTrackQueue', updatedQueue);
-                log(false, "QUEUE DEBUG - Queue partially cleared", {
-                    processed_items: queue.length,
-                    remaining_items: updatedQueue.length
-                });
-            } else {
-                // If current queue size <= sent queue size, clear everything
-                templateDataStorage.setItemCopy('rawTrackQueue', []);
-                // Reset queue start time only if we cleared the entire queue
-                templateDataStorage.setItemCopy('queueStartTime', 0);
-                log(false, "QUEUE DEBUG - Queue cleared", {
-                    cleared_items: currentQueue.length
-                });
-            }
         })
         .catch((error) => {
             log(true, "ERROR: Failed to send batch", error);
-            // On error, we'll leave the queue as is for a retry later
+            // We don't retry since we already cleared the queue
         });
 };
 
@@ -422,17 +516,31 @@ const checkStaleQueue = () => {
     const queueStartTime = templateDataStorage.getItemCopy('queueStartTime') || 0;
 
     if (queue.length === 0 || queueStartTime === 0) {
+        log(false, "QUEUE DEBUG - No stale queue to process");
         return;
     }
 
     const currentTime = getTimestampMillis();
     const timeElapsed = currentTime - queueStartTime;
 
+    log(false, "QUEUE DEBUG - Checking for stale queue", {
+        queue_size: queue.length,
+        time_elapsed: timeElapsed,
+        max_age: OPTIONS.MAX_BATCH_AGE_MS,
+        is_stale: timeElapsed >= OPTIONS.MAX_BATCH_AGE_MS
+    });
+
     if (timeElapsed >= OPTIONS.MAX_BATCH_AGE_MS) {
         log(false, "QUEUE DEBUG - Found stale queue, sending batch");
-        sendBatch(queue);
+        
+        // Make a copy of the current queue to send
+        const queueToSend = queue.slice(0);
+        
+        // Send a copy of the current queue
+        sendBatch(queueToSend);
     }
 };
+
 
 // Initialize the template
 const initialize = () => {

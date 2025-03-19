@@ -78,7 +78,7 @@ const sendHttpGet = function(url, options) {
 
 ## Debugging
 
-When troubleshooting, enable the `EXTRA_LOG` option to get detailed information about:
+When troubleshooting, enable the `extraLog` option to get detailed information about:
 
 - Event processing
 - Batch creation and sending
