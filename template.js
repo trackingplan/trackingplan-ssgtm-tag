@@ -48,6 +48,11 @@ const generateRandom = require('generateRandom');
 const makeInteger = require('makeInteger');
 const getContainerVersion = require('getContainerVersion');
 const Math = require('Math');
+const sendHttpGet = require('sendHttpGet');
+const getCookieValues = require('getCookieValues');
+const setCookie = require('setCookie');
+const Promise = require('Promise');
+const callLater = require('callLater');
 
 /**
  * Parses, validates, and returns all options from the data object.
@@ -387,114 +392,206 @@ const addToQueue = (rawTrack) => {
 };
 
 /**
+ * Downloads and stores the Trackingplan config file
+ * @return {Promise} A promise that resolves when the config is downloaded and stored
+ */
+const downloadAndStoreConfig = () => {
+    const configUrl = 'https://config.trackingplan.com/config-' + OPTIONS.TP_ID + '.json';
+    const configCookieName = '__TP_CONFIG_JSON';
+    const configLockKey = 'tp_config_download_lock';
+    const configLockTimeout = 30000; // 30 seconds timeout for the lock
+    
+    // Check if we already have a valid config cookie
+    const existingConfig = getCookieValues(configCookieName)[0];
+    if (existingConfig) {
+        log(false, "CONFIG - Using existing config from cookie");
+        return Promise.resolve();
+    }
+
+    // Check if there's an active download lock
+    const lockTimestamp = templateDataStorage.getItemCopy(configLockKey);
+    const currentTime = getTimestampMillis();
+    
+    if (lockTimestamp) {
+        // If lock is older than timeout, consider it stale and proceed
+        if (currentTime - lockTimestamp > configLockTimeout) {
+            log(false, "CONFIG - Found stale lock, proceeding with download");
+            templateDataStorage.removeItem(configLockKey);
+        } else {
+            log(false, "CONFIG - Download already in progress, skipping");
+            return Promise.create((resolve, reject) => {
+                reject('Download already in progress');
+            });
+        }
+    }
+
+    // Set the download lock
+    templateDataStorage.setItemCopy(configLockKey, currentTime);
+
+    log(false, "CONFIG - Downloading config from", configUrl);
+    
+    return sendHttpGet(configUrl)
+        .then((response) => {
+            if (response.statusCode >= 200 && response.statusCode < 300) {
+                // Store the config in a cookie for 24 hours
+                setCookie(configCookieName, response.body, {
+                    'max-age': 24 * 60 * 60, // 24 hours in seconds
+                    'path': '/',
+                    'secure': true,
+                    'sameSite': 'strict'
+                });
+                log(false, "CONFIG - Successfully downloaded and stored config");
+                // Remove the lock
+                templateDataStorage.removeItem(configLockKey);
+                return Promise.resolve();
+            } else {
+                log(true, "CONFIG - Failed to download config, status:", response.statusCode);
+                // Remove the lock on failure
+                templateDataStorage.removeItem(configLockKey);
+                return Promise.reject('Failed to download config');
+            }
+        })
+        .catch((error) => {
+            log(true, "CONFIG - Error downloading config:", error);
+            // Remove the lock on error
+            templateDataStorage.removeItem(configLockKey);
+            return Promise.reject('Error downloading config');
+        });
+};
+
+/**
+ * Checks if we have a valid config before proceeding
+ * @return {Promise} A promise that resolves if we have a valid config
+ */
+const ensureConfig = () => {
+    const configCookieName = '__TP_CONFIG_JSON';
+    const existingConfig = getCookieValues(configCookieName)[0];
+    
+    if (existingConfig) {
+        log(false, "CONFIG - Using existing config from cookie");
+        return Promise.resolve();
+    }
+    
+    log(false, "CONFIG - No config found, downloading...");
+    return downloadAndStoreConfig();
+};
+
+/**
  * Sends a batch of raw tracks to the Trackingplan API
  *
  * @param {Array} queueToSend The queue of raw tracks to send
  */
 const sendBatch = (queueToSend) => {
-    // If queue is not provided, get the latest state
-    let queue = queueToSend;
-    if (!queue) {
-        queue = templateDataStorage.getItemCopy('rawTrackQueue') || [];
-    }
-
-    // Don't send if queue is empty
-    if (!queue.length) {
-        log(false, "QUEUE DEBUG - Empty queue, nothing to send");
-        return;
-    }
-
-    // Store the length of the queue we're sending
-    const sentQueueLength = queue.length;
-    
-    // Log what we're about to send
-    log(false, "QUEUE DEBUG - Sending batch", {
-        batch_size: sentQueueLength
-    });
-
-    // Get container info to include as tags
-    const containerInfo = getContainerVersion();
-
-    // Create tags object with container info
-    const tags = {};
-    if (containerInfo) {
-        // Add each container property as a tag with prefix
-        for (var key in containerInfo) {
-            if (containerInfo.hasOwnProperty(key)) {
-                tags['ssgtm_container_version.' + key] = containerInfo[key];
+    // First ensure we have a valid config
+    ensureConfig()
+        .then(() => {
+            // If queue is not provided, get the latest state
+            let queue = queueToSend;
+            if (!queue) {
+                queue = templateDataStorage.getItemCopy('rawTrackQueue') || [];
             }
-        }
 
-        // Add a special tag for gtm_container_version
-        tags.gtm_container_version = containerInfo.version;
-    }
+            // Don't send if queue is empty
+            if (!queue.length) {
+                log(false, "QUEUE DEBUG - Empty queue, nothing to send");
+                return;
+            }
 
-    const batchPayload = {
-        requests: queue,
-        common: {
-            context: {},
-            // A key that identifies the customer
-            tp_id: OPTIONS.TP_ID,
-            // An optional alias that identifies the source
-            source_alias: "SSGTM",
-            // An optional environment. Can be "PRODUCTION" or "TESTING"
-            environment: OPTIONS.ENVIRONMENT,
-            // The used sdk
-            sdk: "ssgtm",
-            // The SDK version
-            sdk_version: OPTIONS.VERSION,
-            // The rate at which this specific track has been sampled
-            sampling_rate: OPTIONS.SAMPLING_RATE,
-            // Container info tags
-            tags: tags
-        }
-    };
-
-    log(false, "BATCH PAYLOAD TO SEND", batchPayload);
-
-    // Clear the queue immediately after preparing the payload
-    // Get the current queue state
-    let currentQueue = templateDataStorage.getItemCopy('rawTrackQueue') || [];
-    
-    // If the current queue is longer than what we sent, it means new items were added
-    // We only remove the items we sent, keeping the new ones
-    if (currentQueue.length > sentQueueLength) {
-        // Only remove the number of items we processed
-        // This assumes FIFO queue behavior where older items are at the beginning
-        let updatedQueue = currentQueue.slice(sentQueueLength);
-        templateDataStorage.setItemCopy('rawTrackQueue', updatedQueue);
-        
-        log(false, "QUEUE DEBUG - Queue partially cleared", {
-            processed_items: sentQueueLength,
-            remaining_items: updatedQueue.length
-        });
-    } else {
-        // If current queue size <= sent queue size, clear everything
-        templateDataStorage.setItemCopy('rawTrackQueue', []);
-        // Reset queue start time
-        templateDataStorage.setItemCopy('queueStartTime', 0);
-        
-        log(false, "QUEUE DEBUG - Queue fully cleared", {
-            cleared_items: currentQueue.length
-        });
-    }
-
-    // Send the batch to the webhook (fire and forget)
-    sendHttpRequest(OPTIONS.WEBHOOK_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-    }, JSON.stringify(batchPayload))
-        .then((response) => {
-            // Just log the response
-            log(true, "BATCH SENT", {
-                endpoint: OPTIONS.WEBHOOK_URL,
-                payload_size: sentQueueLength,
-                response: response.statusCode
+            // Store the length of the queue we're sending
+            const sentQueueLength = queue.length;
+            
+            // Log what we're about to send
+            log(false, "QUEUE DEBUG - Sending batch", {
+                batch_size: sentQueueLength
             });
+
+            // Get container info to include as tags
+            const containerInfo = getContainerVersion();
+
+            // Create tags object with container info
+            const tags = {};
+            if (containerInfo) {
+                // Add each container property as a tag with prefix
+                for (var key in containerInfo) {
+                    if (containerInfo.hasOwnProperty(key)) {
+                        tags['ssgtm_container_version.' + key] = containerInfo[key];
+                    }
+                }
+
+                // Add a special tag for gtm_container_version
+                tags.gtm_container_version = containerInfo.version;
+            }
+
+            const batchPayload = {
+                requests: queue,
+                common: {
+                    context: {},
+                    // A key that identifies the customer
+                    tp_id: OPTIONS.TP_ID,
+                    // An optional alias that identifies the source
+                    source_alias: "SSGTM",
+                    // An optional environment. Can be "PRODUCTION" or "TESTING"
+                    environment: OPTIONS.ENVIRONMENT,
+                    // The used sdk
+                    sdk: "ssgtm",
+                    // The SDK version
+                    sdk_version: OPTIONS.VERSION,
+                    // The rate at which this specific track has been sampled
+                    sampling_rate: OPTIONS.SAMPLING_RATE,
+                    // Container info tags
+                    tags: tags
+                }
+            };
+
+            log(false, "BATCH PAYLOAD TO SEND", batchPayload);
+
+            // Clear the queue immediately after preparing the payload
+            // Get the current queue state
+            let currentQueue = templateDataStorage.getItemCopy('rawTrackQueue') || [];
+            
+            // If the current queue is longer than what we sent, it means new items were added
+            // We only remove the items we sent, keeping the new ones
+            if (currentQueue.length > sentQueueLength) {
+                // Only remove the number of items we processed
+                // This assumes FIFO queue behavior where older items are at the beginning
+                let updatedQueue = currentQueue.slice(sentQueueLength);
+                templateDataStorage.setItemCopy('rawTrackQueue', updatedQueue);
+                
+                log(false, "QUEUE DEBUG - Queue partially cleared", {
+                    processed_items: sentQueueLength,
+                    remaining_items: updatedQueue.length
+                });
+            } else {
+                // If current queue size <= sent queue size, clear everything
+                templateDataStorage.setItemCopy('rawTrackQueue', []);
+                // Reset queue start time
+                templateDataStorage.setItemCopy('queueStartTime', 0);
+                
+                log(false, "QUEUE DEBUG - Queue fully cleared", {
+                    cleared_items: currentQueue.length
+                });
+            }
+
+            // Send the batch to the webhook (fire and forget)
+            sendHttpRequest(OPTIONS.WEBHOOK_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            }, JSON.stringify(batchPayload))
+                .then((response) => {
+                    // Just log the response
+                    log(true, "BATCH SENT", {
+                        endpoint: OPTIONS.WEBHOOK_URL,
+                        payload_size: sentQueueLength,
+                        response: response.statusCode
+                    });
+                })
+                .catch((error) => {
+                    log(true, "ERROR: Failed to send batch", error);
+                    // We don't retry since we already cleared the queue
+                });
         })
         .catch((error) => {
-            log(true, "ERROR: Failed to send batch", error);
-            // We don't retry since we already cleared the queue
+            log(false, "QUEUE DEBUG - Batch not sent due to missing config");
         });
 };
 
@@ -503,35 +600,41 @@ const sendBatch = (queueToSend) => {
  * This handles cases where the container might have been idle for a while
  */
 const checkStaleQueue = () => {
-    const queue = templateDataStorage.getItemCopy('rawTrackQueue') || [];
-    const queueStartTime = templateDataStorage.getItemCopy('queueStartTime') || 0;
+    // First ensure we have a valid config
+    ensureConfig()
+        .then(() => {
+            const queue = templateDataStorage.getItemCopy('rawTrackQueue') || [];
+            const queueStartTime = templateDataStorage.getItemCopy('queueStartTime') || 0;
 
-    if (queue.length === 0 || queueStartTime === 0) {
-        log(false, "QUEUE DEBUG - No stale queue to process");
-        return;
-    }
+            if (queue.length === 0 || queueStartTime === 0) {
+                log(false, "QUEUE DEBUG - No stale queue to process");
+                return;
+            }
 
-    const currentTime = getTimestampMillis();
-    const timeElapsed = currentTime - queueStartTime;
+            const currentTime = getTimestampMillis();
+            const timeElapsed = currentTime - queueStartTime;
 
-    log(false, "QUEUE DEBUG - Checking for stale queue", {
-        queue_size: queue.length,
-        time_elapsed: timeElapsed,
-        max_age: OPTIONS.MAX_BATCH_AGE_MS,
-        is_stale: timeElapsed >= OPTIONS.MAX_BATCH_AGE_MS
-    });
+            log(false, "QUEUE DEBUG - Checking for stale queue", {
+                queue_size: queue.length,
+                time_elapsed: timeElapsed,
+                max_age: OPTIONS.MAX_BATCH_AGE_MS,
+                is_stale: timeElapsed >= OPTIONS.MAX_BATCH_AGE_MS
+            });
 
-    if (timeElapsed >= OPTIONS.MAX_BATCH_AGE_MS) {
-        log(false, "QUEUE DEBUG - Found stale queue, sending batch");
-        
-        // Make a copy of the current queue to send
-        const queueToSend = queue.slice(0);
-        
-        // Send a copy of the current queue
-        sendBatch(queueToSend);
-    }
+            if (timeElapsed >= OPTIONS.MAX_BATCH_AGE_MS) {
+                log(false, "QUEUE DEBUG - Found stale queue, sending batch");
+                
+                // Make a copy of the current queue to send
+                const queueToSend = queue.slice(0);
+                
+                // Send a copy of the current queue
+                sendBatch(queueToSend);
+            }
+        })
+        .catch((error) => {
+            log(false, "QUEUE DEBUG - Stale queue check skipped due to missing config");
+        });
 };
-
 
 // Initialize the template
 const initialize = () => {
