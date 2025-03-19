@@ -211,7 +211,11 @@ const createRawTrack = (provider, request) => {
         // Custom tags from configuration
         "tags": OPTIONS.CUSTOM_TAGS,
         // Top-level timestamp
-        "ts": currentTime
+        "ts": currentTime,
+        // The event data
+        "context": {
+            "ssgtm_event_data": eventData
+        }
     };
 };
 
@@ -245,23 +249,10 @@ const processGTMEvent = () => {
         }
     }
 
-    // Capture the original request
-    const originalRequest = {
-        url: fullRequestUrl,
-        body: getRequestBody(),
-        method: getRequestHeader('method') || "GET"
-    };
-
-    // Construct the post_payload with event_data and original_request
-    const postPayload = {
-        event_data: eventData,
-        original_request: originalRequest
-    };
-
     // Create raw track with the new post_payload
     const raw_track = createRawTrack(provider, {
         url: fullRequestUrl,
-        body: JSON.stringify(postPayload),
+        body: getRequestBody(),
         method: getRequestHeader('method') || "GET"
     });
 
