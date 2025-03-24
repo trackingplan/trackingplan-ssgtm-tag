@@ -1,19 +1,4 @@
-﻿// Copyright 2025 Trackingplan INC.
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-
-//     https://www.apache.org/licenses/LICENSE-2.0
-
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-
-___TERMS_OF_SERVICE___
+﻿___TERMS_OF_SERVICE___
 
 By creating or modifying this file you agree to Google Tag Manager's Community
 Template Gallery Developer Terms of Service available at
@@ -90,7 +75,7 @@ ___TEMPLATE_PARAMETERS___
   {
     "type": "GROUP",
     "name": "advancedSettings",
-    "displayName": "Developer Settings",
+    "displayName": "Settings",
     "groupStyle": "ZIPPY_CLOSED",
     "subParams": [
       {
@@ -109,35 +94,25 @@ ___TEMPLATE_PARAMETERS___
         "defaultValue": "PRODUCTION"
       },
       {
-        "type": "TEXT",
-        "name": "maxBatchSize",
-        "displayName": "Maximum Batch Size",
+        "type": "CHECKBOX",
+        "name": "captureGTM",
+        "checkboxText": "Capture GA4 Requests",
         "simpleValueType": true,
-        "defaultValue": 1,
-        "valueValidators": [
-          {
-            "type": "POSITIVE_NUMBER"
-          }
-        ],
-        "help": "Trackingplan will send data to their servers once it has collected this number of requests"
+        "help": "Send to Trackingplan the GA4 requests as they come into the server.",
+        "defaultValue": true,
+        "alwaysInSummary": false
+      },
+      {
+        "type": "CHECKBOX",
+        "name": "useSessions",
+        "checkboxText": "Use Session ID Cookie",
+        "simpleValueType": true,
+        "defaultValue": false,
+        "help": "Use cookies to identify same session hits within Trackingplan UI"
       },
       {
         "type": "TEXT",
-        "name": "maxBatchAgeSeconds",
-        "displayName": "Max Batch Age",
-        "simpleValueType": true,
-        "defaultValue": 5,
-        "valueValidators": [
-          {
-            "type": "POSITIVE_NUMBER"
-          }
-        ],
-        "help": "This is the number of seconds to send data to Trackingplan even if the batch has not reached it size limit",
-        "valueUnit": "seconds"
-      },
-      {
-        "type": "TEXT",
-        "name": "SamplingRate",
+        "name": "samplingRate",
         "displayName": "Sampling Rate",
         "simpleValueType": true,
         "defaultValue": 1,
@@ -149,31 +124,59 @@ ___TEMPLATE_PARAMETERS___
         "help": "The % of requests to be captured is defined by 100 / Sampling Rate. 1 means capture everything."
       },
       {
-        "type": "TEXT",
-        "name": "endpoint",
-        "displayName": "Trackingplan Endpoint",
-        "simpleValueType": true,
-        "defaultValue": "https://tracks.trackingplan.com/v1/",
-        "valueValidators": [
+        "type": "GROUP",
+        "name": "developerSettings",
+        "displayName": "Developer Settings",
+        "groupStyle": "NO_ZIPPY",
+        "subParams": [
           {
-            "type": "NON_EMPTY"
+            "type": "CHECKBOX",
+            "name": "extraLog",
+            "checkboxText": "Log developer traces",
+            "simpleValueType": true,
+            "help": "This displays extra debug messages mainly for Trackingplan developers. This don\u0027t overrides the logging permissions."
+          },
+          {
+            "type": "TEXT",
+            "name": "maxBatchSize",
+            "displayName": "Maximum Batch Size",
+            "simpleValueType": true,
+            "defaultValue": 1,
+            "valueValidators": [
+              {
+                "type": "POSITIVE_NUMBER"
+              }
+            ],
+            "help": "Trackingplan will send data to their servers once it has collected this number of requests"
+          },
+          {
+            "type": "TEXT",
+            "name": "endpoint",
+            "displayName": "Trackingplan Endpoint",
+            "simpleValueType": true,
+            "defaultValue": "https://tracks.trackingplan.com/v1/",
+            "valueValidators": [
+              {
+                "type": "NON_EMPTY"
+              }
+            ],
+            "help": "The Trackingplan collector endpoint. It can vary by region."
+          },
+          {
+            "type": "TEXT",
+            "name": "maxBatchAgeSeconds",
+            "displayName": "Max Batch Age",
+            "simpleValueType": true,
+            "defaultValue": 5,
+            "valueValidators": [
+              {
+                "type": "POSITIVE_NUMBER"
+              }
+            ],
+            "help": "This is the number of seconds to send data to Trackingplan even if the batch has not reached it size limit",
+            "valueUnit": "seconds"
           }
-        ],
-        "help": "The Trackingplan collector endpoint. It can vary by region."
-      },
-      {
-        "type": "CHECKBOX",
-        "name": "useSessions",
-        "checkboxText": "Use Session ID Cookie",
-        "simpleValueType": true,
-        "defaultValue": true
-      },
-      {
-        "type": "CHECKBOX",
-        "name": "extraLog",
-        "checkboxText": "Log developer traces",
-        "simpleValueType": true,
-        "help": "This displays extra debug messages mainly for Trackingplan developers. This don\u0027t overrides the logging permissions."
+        ]
       }
     ]
   }
@@ -211,37 +214,13 @@ ___SANDBOXED_JS_FOR_SERVER___
  * - tags: Custom key-value pairs to send with all events
  * - extraLog: Enable detailed logging for debugging
  * - useSessions: Enable session tracking (default: false)
+ * - captureGTM: Enable GTM event capture (default: false)
  *
  * @version 2
  * @see https://docs.trackingplan.com/
  */
 
 const VERSION = "2";
-
-/**
- * Generates a UUID v4 (random) compliant string using sGTM's generateRandom
- * This is a pure implementation that avoids using browser APIs or external libraries
- * @return {string} A UUID v4 string
- */
-const generateUUID = () => {
-    const hex = [];
-    for (let i = 0; i < 36; i++) {
-        if (i === 8 || i === 13 || i === 18 || i === 23) {
-            hex[i] = '-';
-        } else if (i === 14) {
-            // Version 4 UUID has '4' at this position
-            hex[i] = '4';
-        } else if (i === 19) {
-            // UUID v4 needs (8, 9, a, or b) at this position
-            const randVal = generateRandom(8, 11);
-            hex[i] = (randVal === 10 ? 'a' : randVal === 11 ? 'b' : randVal).toString(16);
-        } else {
-            const randVal = generateRandom(0, 15);
-            hex[i] = randVal.toString(16);
-        }
-    }
-    return hex.join('');
-};
 
 const addMessageListener = require('addMessageListener');
 const logToConsole = require('logToConsole');
@@ -268,7 +247,7 @@ const setCookie = require('setCookie');
  */
 const getOptions = () => {
     const options = {
-        MAX_BATCH_SIZE: makeInteger(data.maxBatchSize) || 20,
+        MAX_BATCH_SIZE: makeInteger(data.maxBatchSize) || 1,
         MAX_BATCH_AGE_MS: (makeInteger(data.maxBatchAgeSeconds) || 5) * 1000,
         TP_ID: data.tpId,
         SAMPLING_RATE: makeInteger(data.samplingRate) || 1,
@@ -279,11 +258,8 @@ const getOptions = () => {
         VERSION: VERSION,
         // Add useSessions parameter with default value of false
         USE_SESSIONS: !!data.useSessions,
-        // Track duplication settings
-        // Max number of track hashes to keep in storage to prevent duplicates
-        MAX_HASH_COUNT: 1000,
-        // Time in milliseconds after which to clear track hashes (default: 1 hour)
-        HASH_TTL_MS: 60 * 60 * 1000
+        // Add captureGTM parameter with default value of false
+        CAPTURE_GTM: !!data.captureGTM,
     };
 
     // Process custom tags from data.TAGS
@@ -307,6 +283,31 @@ const getOptions = () => {
 
 // Parse all configuration options once
 const OPTIONS = getOptions();
+
+/**
+ * Generates a UUID v4 (random) compliant string using sGTM's generateRandom
+ * This is a pure implementation that avoids using browser APIs or external libraries
+ * @return {string} A UUID v4 string
+ */
+const generateUUID = () => {
+    const hex = [];
+    for (let i = 0; i < 36; i++) {
+        if (i === 8 || i === 13 || i === 18 || i === 23) {
+            hex[i] = '-';
+        } else if (i === 14) {
+            // Version 4 UUID has '4' at this position
+            hex[i] = '4';
+        } else if (i === 19) {
+            // UUID v4 needs (8, 9, a, or b) at this position
+            const randVal = generateRandom(8, 11);
+            hex[i] = (randVal === 10 ? 'a' : randVal === 11 ? 'b' : randVal).toString(16);
+        } else {
+            const randVal = generateRandom(0, 15);
+            hex[i] = randVal.toString(16);
+        }
+    }
+    return hex.join('');
+};
 
 
 /**
@@ -783,8 +784,10 @@ const checkStaleQueue = () => {
 
 // Initialize the template
 const initialize = () => {
-    // Process the GTM event
-    processGTMEvent();
+    // Process the GTM event only if captureGTM is enabled
+    if (OPTIONS.CAPTURE_GTM) {
+        processGTMEvent();
+    } 
 
     // Set up the message listener
     setupMessageListener();
