@@ -21,17 +21,19 @@
  * - tpId: Your Trackingplan ID (required)
  * - maxBatchSize: Maximum number of events to include in a single batch (default: 20)
  * - maxBatchAgeSeconds: Maximum time to wait before sending a batch (default: 5 seconds)
- * - samplingRate: Event sampling rate (1 = all events, 10 = 10% of events, etc.)
+ * - samplingRate: Event sampling rate (1 = all events, 10 = one out of 10 of events, etc.)
  * - environment: Environment identifier (default: "PRODUCTION").
  * - endpoint: Trackingplan API endpoint (default: https://tracks.trackingplan.com/v1/)
  * - tags: Custom key-value pairs to send with all events
- * - extraLog: Enable detailed logging for debugging
+ * - extraLog: Enable detailed logging for debugging (default: false)
+ * - useSessions: Enable session tracking (default: false)
+ * - captureGTM: Enable GTM event capture (default: false)
  *
- * @version 1
+ * @version 2
  * @see https://docs.trackingplan.com/
  */
 
-const VERSION = "1";
+const VERSION = "2";
 
 const addMessageListener = require('addMessageListener');
 const logToConsole = require('logToConsole');
@@ -48,6 +50,9 @@ const generateRandom = require('generateRandom');
 const makeInteger = require('makeInteger');
 const getContainerVersion = require('getContainerVersion');
 const Math = require('Math');
+const getCookieValues = require('getCookieValues');
+const setCookie = require('setCookie');
+
 
 /**
  * Parses, validates, and returns all options from the data object.
@@ -55,7 +60,7 @@ const Math = require('Math');
  */
 const getOptions = () => {
     const options = {
-        MAX_BATCH_SIZE: makeInteger(data.maxBatchSize) || 20,
+        MAX_BATCH_SIZE: makeInteger(data.maxBatchSize) || 1,
         MAX_BATCH_AGE_MS: (makeInteger(data.maxBatchAgeSeconds) || 5) * 1000,
         TP_ID: data.tpId,
         SAMPLING_RATE: makeInteger(data.samplingRate) || 1,
@@ -64,11 +69,10 @@ const getOptions = () => {
         CUSTOM_TAGS: {},
         EXTRA_LOG: !!data.extraLog,
         VERSION: VERSION,
-        // Track duplication settings
-        // Max number of track hashes to keep in storage to prevent duplicates
-        MAX_HASH_COUNT: 1000,
-        // Time in milliseconds after which to clear track hashes (default: 1 hour)
-        HASH_TTL_MS: 60 * 60 * 1000
+        // Add useSessions parameter with default value of false
+        USE_SESSIONS: !!data.useSessions,
+        // Add captureGTM parameter with default value of false
+        CAPTURE_GTM: !!data.captureGTM,
     };
 
     // Process custom tags from data.TAGS
@@ -92,6 +96,66 @@ const getOptions = () => {
 
 // Parse all configuration options once
 const OPTIONS = getOptions();
+
+/**
+ * Generates a UUID v4 (random) compliant string using sGTM's generateRandom
+ * This is a pure implementation that avoids using browser APIs or external libraries
+ * @return {string} A UUID v4 string
+ */
+const generateUUID = () => {
+    const hex = [];
+    for (let i = 0; i < 36; i++) {
+        if (i === 8 || i === 13 || i === 18 || i === 23) {
+            hex[i] = '-';
+        } else if (i === 14) {
+            // Version 4 UUID has '4' at this position
+            hex[i] = '4';
+        } else if (i === 19) {
+            // UUID v4 needs (8, 9, a, or b) at this position
+            const randVal = generateRandom(8, 11);
+            hex[i] = (randVal === 10 ? 'a' : randVal === 11 ? 'b' : randVal).toString(16);
+        } else {
+            const randVal = generateRandom(0, 15);
+            hex[i] = randVal.toString(16);
+        }
+    }
+    return hex.join('');
+};
+
+
+/**
+ * Updates and returns the session ID, creating a new one if needed
+ * Session expires after 30 minutes of inactivity
+ * @return {string} The current session ID
+ */
+const updateAndGetSessionId = () => {
+    const COOKIE_NAME = '_TP_SID';
+    const SESSION_TIMEOUT_MINS = 30;
+    
+    // Try to get existing session ID
+    const existingSessionId = getCookieValues(COOKIE_NAME)[0];
+    
+    if (existingSessionId) {
+        // Extend the session by setting the cookie again
+        setCookie(COOKIE_NAME, existingSessionId, {
+            'max-age': SESSION_TIMEOUT_MINS * 60,
+            'secure': true,
+            'httpOnly': true
+        });
+        return existingSessionId;
+    }
+    
+    // Create new session ID if none exists
+    const newSessionId = generateUUID();
+    setCookie(COOKIE_NAME, newSessionId, {
+        'max-age': SESSION_TIMEOUT_MINS * 60,
+        'secure': true,
+        'httpOnly': true
+    });
+    
+    return newSessionId;
+};
+
 
 /**
  * Logging utility that respects the EXTRA_LOG setting
@@ -416,15 +480,9 @@ const sendBatch = (queueToSend) => {
     const containerInfo = getContainerVersion();
 
     // Create tags object with container info
-    const tags = {};
+    const tags = OPTIONS.CUSTOM_TAGS;
+    
     if (containerInfo) {
-        // Add each container property as a tag with prefix
-        for (var key in containerInfo) {
-            if (containerInfo.hasOwnProperty(key)) {
-                tags['ssgtm_container_version.' + key] = containerInfo[key];
-            }
-        }
-
         // Add a special tag for gtm_container_version
         tags.gtm_container_version = containerInfo.version;
     }
@@ -432,7 +490,9 @@ const sendBatch = (queueToSend) => {
     const batchPayload = {
         requests: queue,
         common: {
-            context: {},
+            context: { 
+                ssgtm_container_version: containerInfo,
+            },
             // A key that identifies the customer
             tp_id: OPTIONS.TP_ID,
             // An optional alias that identifies the source
@@ -446,7 +506,9 @@ const sendBatch = (queueToSend) => {
             // The rate at which this specific track has been sampled
             sampling_rate: OPTIONS.SAMPLING_RATE,
             // Container info tags
-            tags: tags
+            tags: tags,
+            // Only include session_id if USE_SESSIONS is true
+            session_id: OPTIONS.USE_SESSIONS ? updateAndGetSessionId() : null
         }
     };
 
@@ -535,8 +597,10 @@ const checkStaleQueue = () => {
 
 // Initialize the template
 const initialize = () => {
-    // Process the GTM event
-    processGTMEvent();
+    // Process the GTM event only if captureGTM is enabled
+    if (OPTIONS.CAPTURE_GTM) {
+        processGTMEvent();
+    } 
 
     // Set up the message listener
     setupMessageListener();
