@@ -36,14 +36,18 @@ This should be done on all the templates that want to be monitored by Trackingpl
 ### Trackingplan Snippet
 
 ```javascript
-/* Trackingplan snippet */
+/* Trackingplan snippet to be included in on top of templates to be monitored by Trackingplan */
 const sendHttpRequest = (url, options, body) => {
-  require('sendMessage')('tp_request', { url: url, body: body });
-  return require('sendHttpRequest')(url, options, body);
+    require('addEventCallback')(() => {
+        require('sendMessage')('tp_request', { url: url, body: body });
+    });
+    return require('sendHttpRequest')(url, options, body);
 };
-const sendHttpGet = function(url, options) {
-  require('sendMessage')('tp_request', { url: url });
-  return require('sendHttpGet')(url, options);
+const sendHttpGet = function (url, options) {
+    require('addEventCallback')(() => {
+        require('sendMessage')('tp_request', { url: url });
+    });
+    return require('sendHttpGet')(url, options);
 };
 /* End of Trackingplan snippet */
 ```
@@ -75,6 +79,8 @@ const sendHttpGet = function(url, options) {
 | `endpoint` | Trackingplan API endpoint | "https://tracks.trackingplan.com/v1/" |
 | `tags` | Custom key-value pairs to send with all events | {} |
 | `extraLog` | Enable detailed logging for debugging | false |
+| `useSessions` | Enable session tracking with 30-minute timeout | false |
+| `captureGTM` | Enable GTM event capture | true |
 
 ## Debugging
 
