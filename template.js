@@ -479,8 +479,10 @@ const sendBatch = (queueToSend) => {
     // Get container info to include as tags
     const containerInfo = getContainerVersion();
 
-    // Create tags object with container info
-    const tags = OPTIONS.CUSTOM_TAGS;
+    // Copy the custom tags into a fresh object so that attaching the batch-level
+    // gtm_container_version below never mutates the shared OPTIONS.CUSTOM_TAGS
+    // reference that every per-track "tags" field points at.
+    const tags = JSON.parse(JSON.stringify(OPTIONS.CUSTOM_TAGS));
     
     if (containerInfo) {
         // Add a special tag for gtm_container_version
